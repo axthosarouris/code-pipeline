@@ -1,0 +1,13 @@
+
+plugins {
+    id 'code-pipeline.java-common-conventions'
+}
+
+dependencies {
+    implementation libs.aws.sdk.s3
+    implementation libs.bundles.testing
+    implementation libs.commons.lang
+    implementation libs.nva.core
+}
+
+

@@ -1,0 +1,263 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+
+Description: >
+  Version: 1.5 continuous_build_pipeline
+
+  Creates a CodePipeline for serverless applications that for the given GitHubBranch:
+  pulls source from github, builds a application and deploys the distribution to
+
+#
+# Changes:
+# Version 1.1: Added dynamoDB actions to DeployLambdaRole
+#         1.2: Added logs:  actions
+#         1.4: Added dynamodb:DeleteTable to DeployLambdaRole
+#         1.5: Updated Linux image runtimes  to 5.0
+#
+
+Parameters:
+  GitHubOAuthToken:
+    Description: OAuth token used by AWS CodePipeline to connect to GitHub
+    NoEcho: true
+    Type: String
+    Default: '{{resolve:secretsmanager:githubtoken:SecretString}}'
+  GitHubOwner:
+    Description: GitHub username owning the repo
+    Type: String
+    Default: BIBSYSDEV
+  GitHubRepo:
+    Description: GitHub repo name
+    Type: String
+  GitHubBranch:
+    Description: GitHub repo branch name. It defaults to main if not specified.
+    Type: String
+    Default: main
+  DeployParameterOverrides:
+    Type: String
+    Description: Parameters to send into pipeline
+    Default: "{}"
+  UseManualApproval:
+    Type: String
+    Default: false
+  CodeBuildImage:
+    Type: String
+    Default: aws/codebuild/standard:5.0
+  DeployStackRoleArn:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: The Role ARN for deploying the stack
+    Default: /Deployment/DeployStackRoleArn
+  RequiresDocker:
+    Description: Boolean value if build requires Docker
+    Type: String
+    Default: false
+
+Conditions:
+  UsingManualApproval: !Equals
+    - !Ref UseManualApproval
+    - true
+
+Resources:
+  ContinuousBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      ServiceRole: !GetAtt ContinuousBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: !Ref CodeBuildImage
+        Type: LINUX_CONTAINER
+        PrivilegedMode: !Ref RequiresDocker
+      Source:
+        Type: CODEPIPELINE
+
+  ContinuousBuildPipeline:
+    #  Builds artifacts for the given repository and branch
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Type: S3
+        Location:
+          Ref: ContinuousBuildArtifactsStoreBucket
+      RoleArn: !GetAtt UpdateS3AndCFNRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: GitHubSource
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              Configuration:
+                Owner: !Ref GitHubOwner
+                OAuthToken: !Ref GitHubOAuthToken
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                PollForSourceChanges: true
+              OutputArtifacts:
+                - Name: !Sub '${GitHubRepo}-Source'
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                EnvironmentVariables: !Sub
+                  - '[{"name":"S3_BUCKET","value":"${ContinuousBuildArtifactsStoreBucket}","type":"PLAINTEXT"}]'
+                  - ContinuousBuildArtifactsStoreBucket: !Ref ContinuousBuildArtifactsStoreBucket
+                ProjectName: !GetAtt ContinuousBuildProject.Arn
+              InputArtifacts:
+                - Name: !Sub '${GitHubRepo}-Source'
+              OutputArtifacts:
+                - Name: !Sub '${GitHubRepo}-Build'
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - !If
+              - UsingManualApproval
+              - Name: Approval
+                RunOrder: 1
+                ActionTypeId:
+                  Category: Approval
+                  Provider: Manual
+                  Owner: AWS
+                  Version: '1'
+                Configuration:
+                  CustomData: Approve this build and proceed to deploy?
+              - !Ref AWS::NoValue
+            - Name: DeployWithCloudformation
+              RunOrder: 2
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              InputArtifacts:
+                - Name: !Sub '${GitHubRepo}-Build'
+              Configuration:
+                ActionMode: REPLACE_ON_FAILURE
+                RoleArn: !Ref  DeployStackRoleArn
+                StackName: !Sub '${AWS::StackName}-${GitHubRepo}'
+                TemplatePath: !Sub '${GitHubRepo}-Build::packaged.yaml'
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                ParameterOverrides:  !Ref DeployParameterOverrides
+
+
+  UpdateS3AndCFNRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: [codepipeline.amazonaws.com]
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+        - PolicyName: UpdateS3AndCFNPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - iam:PassRole
+                Effect: Allow
+                Resource: !Ref DeployStackRoleArn
+              - Action:
+                  - s3:ListBucket
+                  - s3:GetBucketVersioning
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Effect: Allow
+                Resource:
+                  - !Sub ${ContinuousBuildArtifactsStoreBucket.Arn}/*
+              - Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Effect: Allow
+                Resource: !GetAtt ContinuousBuildProject.Arn
+              - Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:CreateStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:UpdateStack
+                  - cloudformation:DeleteStack
+                Effect: Allow
+                Resource: '*'
+              - Action:
+                  - ssm:GetSecretValue
+                  - ssm:GetParameters
+                Effect: Allow
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/*'
+
+  ContinuousBuildServiceRole:
+    Type: AWS::IAM::Role
+    DependsOn: ContinuousBuildArtifactsStoreBucket
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*'
+        - PolicyName: BucketPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource:
+                  - !Sub 'arn:aws:s3:::${ContinuousBuildArtifactsStoreBucket}/*'
+        - PolicyName: GetDockerHubSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: '*'
+                  ##- !Sub 'arn:aws:secretsmanager:eu-west-1:${AWS::AccountId}:secret:DockerHubCredentials*'
+        - PolicyName: ServerlessRepoAccess # Both DeployStackRole and ContinuousBuildServiceRole needs to have this permission in order to build and deploy ffmpeg layer
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - serverlessrepo:CreateCloudFormationTemplate
+                Resource: '*'
+
+
+  ContinuousBuildArtifactsStoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain

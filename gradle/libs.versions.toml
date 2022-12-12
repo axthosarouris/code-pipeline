@@ -1,0 +1,25 @@
+[versions]
+junit = { strictly = '5.9.1' }
+aws-sdk-one = { strictly = '1.12.352' }
+aws-sdk-two = { strictly = '2.18.28' }
+assertj = { strictly = '3.23.1' }
+commonslang = { strictly = '3.12.0' }
+nva = { strictly = '1.25.20' }
+
+[libraries]
+
+nva-core = { group = 'com.github.bibsysdev', name = 'core', version.ref = 'nva' }
+
+junit-jupiter-api = { group = 'org.junit.jupiter', name = 'junit-jupiter-api', version.ref = 'junit' }
+junit-jupiter-engine = { group = 'org.junit.jupiter', name = 'junit-jupiter-engine', version.ref = 'junit' }
+junit-jupiter-params = { group = 'org.junit.jupiter', name = 'junit-jupiter-params', version.ref = 'junit' }
+assertj = { group = 'org.assertj', name = 'assertj-core', version.ref = 'assertj' }
+
+aws-sdk-s3 = { group = 'software.amazon.awssdk', name = 's3', version = '2.18.28' }
+commons-lang = { group = 'org.apache.commons', name = 'commons-lang3', version.ref = 'commonslang' }
+
+
+
+[bundles]
+testing = ['junit-jupiter-api', 'junit-jupiter-engine', 'junit-jupiter-params', 'assertj', 'commons-lang']
+

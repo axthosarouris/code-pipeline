@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Pipeline template for deploying a stack from bitbucket
+
+Resources:
+
+  Pipeline:
+    DependsOn:
+      - PipelineBucket
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineBucket
+      Name: !Sub 'Pipeline-${AWS::StackName}'
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt PipelineRole.Arn
+      Stages:
+        - Name: Checkout
+          Actions:
+            - RunOrder: 1
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !GetAtt PipelineConnection.ConnectionArn
+                FullRepositoryId: "axthosarouris/poetry-lambda"
+                BranchName: "main"
+                OutputArtifactFormat: "CODE_ZIP"
+              OutputArtifacts:
+                - Name: !Sub 'Source-${AWS::StackName}'
+              Name: CheckoutCode
+        - Name: Build
+          Actions:
+          - RunOrder: 1
+            ActionTypeId:
+              Category: Build
+              Owner: AWS
+              Provider: CodeBuild
+              Version: '1'
+            Configuration:
+              ProjectName: !Sub "CodeBuild-${AWS::StackName}"
+              EnvironmentVariables: !Sub
+                                      - '[{"name":"ARTIFACTS_BUCKET","value":"${PipelineBucket}","type":"PLAINTEXT"}]'
+                                      - PipelineBucket: !Ref PipelineBucket
+            InputArtifacts:
+              - Name: !Sub 'Source-${AWS::StackName}'
+            OutputArtifacts:
+              - Name: !Sub 'Build-${AWS::StackName}'
+            Name: Build
+        - Name: Deploy
+          Actions:
+            - RunOrder: 1
+              Name: DeployStack
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              InputArtifacts:
+                - Name: !Sub 'Build-${AWS::StackName}'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM
+                RoleArn: !GetAtt DeployStackRole.Arn
+                TemplatePath: !Sub 'Build-${AWS::StackName}:packaged.yml'
+                StackName: orestis-hello
+
+
+  PipelineBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'pipeline-${AWS::StackName}'
+
+  PipelineConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: 'repo-connection'
+      ProviderType: GitHub
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*'
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource: "*"
+
+  CodeBuildProject:
+    DependsOn:
+      - CodeBuildRole
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      BadgeEnabled: False
+      Cache:
+        Type: NO_CACHE
+      ConcurrentBuildLimit: 10
+      Description: Build the artefacts that will be deployed in the next stage
+      Environment:
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        EnvironmentVariables:
+            - Name: SOME_KEY
+              Value: SomeValue
+              Type: PLAINTEXT
+        Image: aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+      Name: !Sub "CodeBuild-${AWS::StackName}"
+      QueuedTimeoutInMinutes: 120
+      ResourceAccessRole: !GetAtt CodeBuildRole.Arn
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        BuildSpec: buildspec.yml
+        GitCloneDepth: 1
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 60
+      Visibility: PRIVATE
+
+  PipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: [ codepipeline.amazonaws.com ]
+        Version: '2012-10-17'
+      Policies:
+        - PolicyName: DeployLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Effect: Allow
+                Resource:
+                  - "*"
+              - Action:
+                  - codestar-connections:CreateConnection
+                  - codestar-connections:DeleteConnection
+                  - codestar-connections:UseConnection
+                  - codestar-connections:GetConnection
+                  - codestar-connections:ListConnections
+                  - codestar-connections:ListInstallationTargets
+                  - codestar-connections:GetInstallationUrl
+                  - codestar-connections:StartOAuthHandshake
+                  - codestar-connections:UpdateConnectionInstallation
+                  - codestar-connections:GetIndividualAccessToken
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - cloudformation:DescribeStacks
+                  - s3:*
+                Effect: Allow
+                Resource: "*"
+
+
+  DeployStackRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: [ codepipeline.amazonaws.com ]
+        Version: '2012-10-17'
+      Policies:
+        - PolicyName: DeployLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Effect: Allow
+                Resource:
+                  - "*"
+              - Action:
+                  - codestar-connections:CreateConnection
+                  - codestar-connections:DeleteConnection
+                  - codestar-connections:UseConnection
+                  - codestar-connections:GetConnection
+                  - codestar-connections:ListConnections
+                  - codestar-connections:ListInstallationTargets
+                  - codestar-connections:GetInstallationUrl
+                  - codestar-connections:StartOAuthHandshake
+                  - codestar-connections:UpdateConnectionInstallation
+                  - codestar-connections:GetIndividualAccessToken
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - cloudformation:DescribeStacks
+                  - s3:*
+                Effect: Allow
+                Resource: "*"
+
+
