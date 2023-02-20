@@ -1,9 +1,0 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: Builds Pipelines
-
-Resources:
-  PoetryLambdaStack:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      TemplateURL: !Sub "https://s3.amazonaws.com/cloudformation-templates-us-east-2/EC2ChooseAMI.template"
-      TimeoutInMinutes: Integer

@@ -1,0 +1,147 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Pipeline template for deploying a stack from bitbucket
+
+Parameters:
+  DeployStackRoleArn:
+    Type: String
+  PipelineRoleArn:
+    Type: String
+  PipelineConnectionArn:
+    Type: String
+  PipelineBucketName:
+    Type: String
+  Repository:
+    Type: String
+
+
+Resources:
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Type: S3
+        Location: !Ref PipelineBucketName
+      Name: !Sub 'Pipeline-${AWS::StackName}'
+      RestartExecutionOnUpdate: true
+      RoleArn: !Ref PipelineRoleArn
+      Stages:
+        - Name: Checkout
+          Actions:
+            - RunOrder: 1
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: '1'
+              Configuration:
+                ConnectionArn: !Ref PipelineConnectionArn
+                FullRepositoryId: !Ref Repository
+                BranchName: "main"
+                OutputArtifactFormat: "CODE_ZIP"
+              OutputArtifacts:
+                - Name: !Sub 'Source-${AWS::StackName}'
+              Name: CheckoutCode
+        - Name: Build
+          Actions:
+          - RunOrder: 1
+            ActionTypeId:
+              Category: Build
+              Owner: AWS
+              Provider: CodeBuild
+              Version: '1'
+            Configuration:
+              ProjectName: !Sub "CodeBuild-${AWS::StackName}"
+              EnvironmentVariables: !Sub '[{"name":"ARTIFACTS_BUCKET","value":"${PipelineBucketName}","type":"PLAINTEXT"}]'
+            InputArtifacts:
+              - Name: !Sub 'Source-${AWS::StackName}'
+            OutputArtifacts:
+              - Name: !Sub 'Build-${AWS::StackName}'
+            Name: Build
+        - Name: Deploy
+          Actions:
+            - RunOrder: 1
+              Name: DeployStack
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              InputArtifacts:
+                - Name: !Sub 'Build-${AWS::StackName}'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                RoleArn: !Ref DeployStackRoleArn
+                TemplatePath: !Sub 'Build-${AWS::StackName}::packaged.yml'
+                StackName: orestis-hello
+
+
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*'
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*'
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource: "*"
+
+  CodeBuildProject:
+    DependsOn:
+      - CodeBuildRole
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Artifacts:
+        Type: CODEPIPELINE
+      BadgeEnabled: False
+      Cache:
+        Type: NO_CACHE
+      ConcurrentBuildLimit: 10
+      Description: Build the artefacts that will be deployed in the next stage
+      Environment:
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        EnvironmentVariables:
+            - Name: SOME_KEY
+              Value: SomeValue
+              Type: PLAINTEXT
+        Image: aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+      Name: !Sub "CodeBuild-${AWS::StackName}"
+      QueuedTimeoutInMinutes: 120
+      ResourceAccessRole: !GetAtt CodeBuildRole.Arn
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Source:
+        BuildSpec: buildspec.yml
+        GitCloneDepth: 1
+        Type: CODEPIPELINE
+      TimeoutInMinutes: 60
+      Visibility: PRIVATE
+
+
+
+
+
